@@ -1,6 +1,8 @@
 fastapi
 uvicorn
+yfinance
 pandas
 numpy
 scikit-learn
-yfinance
+requests
+openpyxl
