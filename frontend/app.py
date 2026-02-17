@@ -5,7 +5,7 @@ from datetime import datetime
 
 st.set_page_config("AI Stock Assistant", layout="wide")
 
-API_URL = "http://localhost:8000/chat"
+API_URL = "https://stock-analysiser.onrender.com/chat"
 
 # ---------- STYLE ----------
 st.markdown("""
