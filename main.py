@@ -40,49 +40,89 @@ def auto_detect_risk(volatility: float) -> str:
         return "medium"
     return "low"
 
+FILE_PATH = r"C:\Users\pds217\Documents\project\stock_analysis_data.csv"
+
 def save_user_history(row: dict):
-    os.makedirs("user_history", exist_ok=True)
-    file = os.path.join("user_history", "user_history.csv")
-
-    new_df = pd.DataFrame([row])
-
     try:
-        if os.path.exists(file):
-            old_df = pd.read_csv(file)
-            final_df = pd.concat([old_df, new_df], ignore_index=True)
-        else:
-            final_df = new_df
+        os.makedirs(os.path.dirname(FILE_PATH), exist_ok=True)
 
-        final_df.to_csv(file, index=False)
+        new_df = pd.DataFrame([row])
+
+        if os.path.exists(FILE_PATH):
+            new_df.to_csv(FILE_PATH, mode="a", header=False, index=False)
+        else:
+            new_df.to_csv(FILE_PATH, index=False)
 
     except PermissionError:
-        # Windows Excel lock – skip saving silently
-        return
+        # If Excel is open, skip saving
+        print("CSV file is open. Close Excel and try again.")
+
 
 
 # ---------------- SERVICES ----------------
 class StockService:
     @staticmethod
     def fetch(symbol: str):
-        t = yf.Ticker(symbol)
-        hist = t.history(period="1mo")
+        try:
+            t = yf.Ticker(symbol)
+            hist = t.history(period="6mo", interval="1d", auto_adjust=True)
 
-        returns = hist["Close"].pct_change().dropna()
-        volatility = returns.std() * np.sqrt(252)
+            # ---------- HARD SAFETY CHECK ----------
+            if hist is None or hist.empty:
+                raise ValueError("No market data returned from Yahoo Finance")
 
-        return hist, float(hist["Close"].iloc[-1]), volatility
+            if "Close" not in hist.columns:
+                raise ValueError("Close price column missing in market data")
+
+            hist = hist.dropna(subset=["Close"])
+
+            if len(hist) < 10:
+                raise ValueError("Not enough historical data available")
+
+            returns = hist["Close"].pct_change().dropna()
+
+            if returns.empty:
+                volatility = 0.0
+            else:
+                volatility = returns.std() * np.sqrt(252)
+
+            current_price = float(hist["Close"].iloc[-1])
+
+            return hist, current_price, volatility
+
+        except Exception as e:
+            raise ValueError(f"Data fetch failed: {str(e)}")
+
 
 class Predictor:
     @staticmethod
     def predict(hist):
-        df = hist.copy()
-        df["x"] = range(len(df))
-        model = LinearRegression()
-        model.fit(df[["x"]], df["Close"])
-        next_price = model.predict(pd.DataFrame([[len(df)]], columns=["x"]))[0]
+        try:
+            if hist is None or hist.empty or len(hist) < 10:
+                return 0.0, 0.0
 
-        confidence = model.score(df[["x"]], df["Close"]) * 100
-        return float(next_price), float(confidence)
+            df = hist.copy()
+            df = df.dropna(subset=["Close"])
+            df["x"] = range(len(df))
+
+            model = LinearRegression()
+            model.fit(df[["x"]], df["Close"])
+
+            next_price = model.predict(
+                pd.DataFrame([[len(df)]], columns=["x"])
+            )[0]
+
+            confidence = model.score(df[["x"]], df["Close"]) * 100
+
+            if np.isnan(next_price) or np.isnan(confidence):
+                return 0.0, 0.0
+
+            return float(next_price), float(confidence)
+
+        except:
+            return 0.0, 0.0
+
+
 
 def detect_intent(q):
     q = q.lower()
@@ -98,42 +138,52 @@ def detect_intent(q):
 @app.post("/chat", response_model=StockResponse)
 async def chat(q: StockQuery):
     try:
-        hist, current, vol = StockService.fetch(q.stock)
-        predicted, confidence = Predictor.predict(hist)
-        risk = auto_detect_risk(vol)
-        intent = detect_intent(q.question)
+        # 1️⃣ Fetch stock data
+        hist, current_price, volatility = StockService.fetch(q.stock)
 
-        reply = f"""
-Current Price: ₹{current:.2f}
-Predicted Price: ₹{predicted:.2f}
-Risk Level: {risk.upper()}
-Intent: {intent.upper()}
+        # 2️⃣ Predict next price
+        predicted_price, confidence_score = Predictor.predict(hist)
 
-⚠️ Not financial advice.
-"""
+        # 3️⃣ Detect risk level
+        risk_level = auto_detect_risk(volatility)
 
+        # 4️⃣ Detect user intent
+        intent_detected = detect_intent(q.question)
+
+        # 5️⃣ Create reply message
+        bot_reply = (
+            f"Current Price: ₹{current_price:.2f}\n"
+            f"Predicted Price: ₹{predicted_price:.2f}\n"
+            f"Risk Level: {risk_level.upper()}\n"
+            f"Intent: {intent_detected.upper()}\n\n"
+            "⚠️ Not financial advice."
+        )
+
+        # 6️⃣ Save user history
         save_user_history({
             "timestamp": datetime.now().isoformat(),
             "stock": q.stock,
             "question": q.question,
-            "current_price": current,
-            "predicted_price": predicted,
-            "risk": risk,
-            "intent": intent,
-            "confidence": confidence
+            "current_price": current_price,
+            "predicted_price": predicted_price,
+            "risk": risk_level,
+            "intent": intent_detected,
+            "confidence": confidence_score
         })
 
+        # 7️⃣ Return structured response
         return {
             "stock": q.stock,
-            "current_price": current,
-            "predicted_price": predicted,
-            "risk_preference": risk,
-            "bot_reply": reply,
-            "intent_detected": intent,
-            "confidence_score": confidence
+            "current_price": current_price,
+            "predicted_price": predicted_price,
+            "risk_preference": risk_level,
+            "bot_reply": bot_reply,
+            "intent_detected": intent_detected,
+            "confidence_score": confidence_score
         }
 
     except Exception as e:
+        # 8️⃣ Error fallback (never crash backend)
         return {
             "stock": q.stock,
             "current_price": 0.0,
@@ -143,4 +193,5 @@ Intent: {intent.upper()}
             "intent_detected": "error",
             "confidence_score": 0.0
         }
+
 
